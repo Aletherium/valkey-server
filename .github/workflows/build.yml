@@ -1,0 +1,111 @@
+# .github/workflows/build.yml
+name: Build Valkey
+
+on:
+  workflow_dispatch:
+    inputs:
+      valkey_tag:
+        description: 'valkey-io/valkey tag to build (e.g. 8.1.1)'
+        required: true
+        default: '8.1.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            cc: gcc
+            make_args: ""
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            cc: aarch64-linux-gnu-gcc
+            make_args: ""
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+            cc: cc
+            make_args: ""
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            cc: cc
+            make_args: ""
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Install cross-compiler (Linux ARM64 only)
+        if: matrix.os == 'linux' && matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Clone valkey-io/valkey
+        run: git clone --depth 1 --branch ${{ github.event.inputs.valkey_tag }} https://github.com/valkey-io/valkey.git
+
+      - name: Build
+        run: |
+          cd valkey
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) \
+            CC=${{ matrix.cc }} \
+            MALLOC=libc \
+            BUILD_TLS=no \
+            noopt="" \
+            valkey-server
+
+      - name: Prepare binary
+        run: |
+          FILENAME="valkey-server-${{ matrix.os }}-${{ matrix.arch }}"
+          cp valkey/src/valkey-server "${FILENAME}"
+          chmod 755 "${FILENAME}"
+          sha256sum "${FILENAME}" > "${FILENAME}.sha256" 2>/dev/null || shasum -a 256 "${FILENAME}" > "${FILENAME}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-server-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            valkey-server-${{ matrix.os }}-${{ matrix.arch }}
+            valkey-server-${{ matrix.os }}-${{ matrix.arch }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.valkey_tag }}
+          name: Valkey ${{ github.event.inputs.valkey_tag }}
+          body: |
+            Pre-built Valkey server binaries from [valkey-io/valkey](https://github.com/valkey-io/valkey) tag `${{ github.event.inputs.valkey_tag }}`.
+
+            ## Platforms
+            - `valkey-server-linux-amd64` — Linux x64
+            - `valkey-server-linux-arm64` — Linux ARM64
+            - `valkey-server-darwin-amd64` — macOS x64 (Intel)
+            - `valkey-server-darwin-arm64` — macOS ARM64 (Apple Silicon)
+
+            Windows is not supported — Valkey does not compile for Windows.
+            On Windows, Gabion Framework uses in-memory rate limiting (single instance).
+
+            ## Source
+            Built from: https://github.com/valkey-io/valkey/tree/${{ github.event.inputs.valkey_tag }}
+
+            ## License
+            BSD 3-Clause License
+          files: |
+            valkey-server-*
