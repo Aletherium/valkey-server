@@ -19,13 +19,13 @@ jobs:
         include:
           - os: linux
             arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             cc: gcc
             extra_cflags: ""
             extra_ldflags: ""
           - os: linux
             arch: arm64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             cc: aarch64-linux-gnu-gcc
             extra_cflags: ""
             extra_ldflags: ""
