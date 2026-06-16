@@ -48,14 +48,17 @@ jobs:
           cd valkey
           # valkey's Makefile appends -rdynamic to the final link flags for
           # loadable-module symbol resolution. -rdynamic forces a dynamic
-          # executable and silently defeats -static (a previous run linked
-          # against ld-musl despite LDFLAGS=-static). We load no modules, so
+          # executable and silently defeats -static. We load no modules, so
           # strip -rdynamic to get a truly static binary.
           sed -i 's/-rdynamic//g' src/Makefile
-          make -j"$(nproc)" \
+          # -no-pie alongside -static: Alpine's gcc defaults to PIE, and the
+          # implicit -pie overrides -static (yielding a dynamic PIE against
+          # ld-musl). -no-pie removes that conflict so -static produces a
+          # classic, fully static binary. V=1 prints the real link command.
+          make -j"$(nproc)" V=1 \
             MALLOC=libc \
             BUILD_TLS=no \
-            LDFLAGS="-static" \
+            LDFLAGS="-static -no-pie" \
             noopt="" \
             valkey-server
           # Fail loudly if the result is not actually static: a dynamic
