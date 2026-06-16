@@ -13,52 +13,94 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-linux:
+    # Linux binaries are built static against musl (Alpine). A musl-static
+    # binary has no runtime NSS dlopen (the latent hole of glibc-static) and
+    # runs on ANY Linux host — glibc or musl — with nothing installed. Both
+    # arches go through the same Alpine path so no cross-toolchain drift can
+    # appear between them.
     strategy:
       matrix:
         include:
-          - os: linux
-            arch: amd64
-            runner: ubuntu-22.04
-            cc: gcc
-            extra_cflags: ""
-            extra_ldflags: ""
-          - os: linux
-            arch: arm64
-            runner: ubuntu-22.04
-            cc: aarch64-linux-gnu-gcc
-            extra_cflags: ""
-            extra_ldflags: ""
-          - os: darwin
-            arch: amd64
-            runner: macos-14
-            cc: cc
-            extra_cflags: "-arch x86_64"
-            extra_ldflags: "-arch x86_64"
-          - os: darwin
-            arch: arm64
-            runner: macos-14
-            cc: cc
-            extra_cflags: ""
-            extra_ldflags: ""
-
-    runs-on: ${{ matrix.runner }}
+          - arch: amd64
+            alpine_arch: x86_64
+          - arch: arm64
+            alpine_arch: aarch64
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Install cross-compiler (Linux ARM64 only)
-        if: matrix.os == 'linux' && matrix.arch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Set up QEMU (foreign arch only)
+        if: matrix.alpine_arch != 'x86_64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
+      - name: Set up Alpine (musl) build environment
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: ${{ matrix.alpine_arch }}
+          packages: build-base linux-headers pkgconf git bash
+
+      - name: Clone and build (static musl)
+        shell: alpine.sh {0}
+        run: |
+          git clone --depth 1 --branch ${{ github.event.inputs.valkey_tag }} https://github.com/valkey-io/valkey.git
+          cd valkey
+          make -j"$(nproc)" \
+            MALLOC=libc \
+            BUILD_TLS=no \
+            LDFLAGS="-static" \
+            noopt="" \
+            valkey-server
+          # Fail loudly if the result is not actually static: a dynamic
+          # binary would silently reintroduce the host-library dependency
+          # this whole build exists to remove. A static binary references
+          # no .so; any .so line means the link was not static.
+          if ldd src/valkey-server 2>&1 | grep -q '\.so'; then
+            echo "ERROR: valkey-server is dynamically linked (expected static)" >&2
+            ldd src/valkey-server >&2 || true
+            exit 1
+          fi
+
+      - name: Prepare binary
+        shell: alpine.sh {0}
+        run: |
+          FILENAME="valkey-server-linux-${{ matrix.arch }}"
+          cp valkey/src/valkey-server "${FILENAME}"
+          chmod 755 "${FILENAME}"
+          sha256sum "${FILENAME}" > "${FILENAME}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-server-linux-${{ matrix.arch }}
+          path: |
+            valkey-server-linux-${{ matrix.arch }}
+            valkey-server-linux-${{ matrix.arch }}.sha256
+
+  build-macos:
+    # macOS is self-contained by design: binaries link against libSystem,
+    # which is always present. No static linking (Apple ships no static
+    # libc) and none is needed.
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            extra_cflags: "-arch x86_64"
+            extra_ldflags: "-arch x86_64"
+          - arch: arm64
+            extra_cflags: ""
+            extra_ldflags: ""
+    runs-on: macos-14
+
+    steps:
       - name: Clone valkey-io/valkey
         run: git clone --depth 1 --branch ${{ github.event.inputs.valkey_tag }} https://github.com/valkey-io/valkey.git
 
       - name: Build
         run: |
           cd valkey
-          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) \
-            CC=${{ matrix.cc }} \
+          make -j"$(sysctl -n hw.ncpu)" \
             MALLOC=libc \
             BUILD_TLS=no \
             CFLAGS="${{ matrix.extra_cflags }}" \
@@ -68,21 +110,21 @@ jobs:
 
       - name: Prepare binary
         run: |
-          FILENAME="valkey-server-${{ matrix.os }}-${{ matrix.arch }}"
+          FILENAME="valkey-server-darwin-${{ matrix.arch }}"
           cp valkey/src/valkey-server "${FILENAME}"
           chmod 755 "${FILENAME}"
-          sha256sum "${FILENAME}" > "${FILENAME}.sha256" 2>/dev/null || shasum -a 256 "${FILENAME}" > "${FILENAME}.sha256"
+          shasum -a 256 "${FILENAME}" > "${FILENAME}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: valkey-server-${{ matrix.os }}-${{ matrix.arch }}
+          name: valkey-server-darwin-${{ matrix.arch }}
           path: |
-            valkey-server-${{ matrix.os }}-${{ matrix.arch }}
-            valkey-server-${{ matrix.os }}-${{ matrix.arch }}.sha256
+            valkey-server-darwin-${{ matrix.arch }}
+            valkey-server-darwin-${{ matrix.arch }}.sha256
 
   release:
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -99,9 +141,13 @@ jobs:
           body: |
             Pre-built Valkey server binaries from [valkey-io/valkey](https://github.com/valkey-io/valkey) tag `${{ github.event.inputs.valkey_tag }}`.
 
+            Linux binaries are statically linked against musl: they run on any
+            Linux host (glibc or musl) with no system libraries installed.
+            macOS binaries link against libSystem (always present).
+
             ## Platforms
-            - `valkey-server-linux-amd64` — Linux x64
-            - `valkey-server-linux-arm64` — Linux ARM64
+            - `valkey-server-linux-amd64` — Linux x64 (static, musl)
+            - `valkey-server-linux-arm64` — Linux ARM64 (static, musl)
             - `valkey-server-darwin-amd64` — macOS x64 (Intel)
             - `valkey-server-darwin-arm64` — macOS ARM64 (Apple Silicon)
 

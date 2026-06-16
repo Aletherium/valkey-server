@@ -15,7 +15,7 @@ This repository provides cross-platform Valkey binaries built from [valkey-io/va
 | `valkey-server-darwin-amd64` | macOS x64 (Intel) |
 | `valkey-server-darwin-arm64` | macOS ARM64 (Apple Silicon) |
 
-Windows is not supported — Valkey (a C project) does not compile for Windows natively.
+Windows is not supported — Valkey (a C project built around POSIX) does not compile for Windows natively. Tools embedding these binaries fall back to in-memory mode on Windows, or connect to an external Valkey/Redis server.
 
 ## Download
 
@@ -23,10 +23,15 @@ Binaries are available on the [Releases](https://github.com/Aletherium/valkey-se
 
 ## Build details
 
-Binaries are compiled with:
-- `MALLOC=libc` — standard C allocator for maximum portability
+Linux binaries are statically linked against musl (built inside Alpine):
+- `MALLOC=libc` — standard C allocator (jemalloc is omitted; it does not static-link cleanly against musl)
 - `BUILD_TLS=no` — TLS disabled (not needed for localhost development)
-- Linux ARM64 cross-compiled with `aarch64-linux-gnu-gcc`
+- `LDFLAGS=-static` — fully static; the binary carries no runtime dependency on any system library
+- ARM64 is built in an aarch64 Alpine environment via QEMU — the same path as x64, with no separate cross-toolchain
+
+A musl-static binary runs on **any** Linux host — glibc or musl — with nothing installed, and has no runtime NSS dynamic loading (the hidden dependency a static glibc binary would otherwise keep).
+
+macOS binaries link against libSystem, which is always present, so they are self-contained without static linking. The x64 build is cross-compiled on an ARM64 runner with `-arch x86_64`.
 
 These are development binaries optimized for portability, not production performance. For production deployments, use the official Valkey packages with jemalloc and TLS support.
 
